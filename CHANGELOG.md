@@ -1,7 +1,7 @@
 # Changelog
 
 ## Unreleased
-- Host compatibility report form and compatibility table in the README.
+- Host compatibility report form and a per-scenario table (worked / failed with report link / not tried); netcup test recorded as #2.
 
 ## 0.1.1 (2026-10-23)
 - Fix #1: `restore` now removes restored files from `.ftpdeploy-state`, so the next normal deploy

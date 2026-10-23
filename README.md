@@ -123,14 +123,19 @@ so the next normal run uploads them again.
 
 ## Host compatibility
 
-Each row is one provider, one plan and one tool version, with only the scenarios that were actually
-tried. A row means "this worked for this person on this setup", not "this works on this provider".
+Each row is one report: one provider, one plan, one tool version. Every scenario is marked
+**worked**, **failed** or **not tried**. Failed results stay in the table with a link to the report,
+and "not tried" is never counted as a success: a scenario that passes in the local test suite is
+still "not tried" on a host until someone ran it there. A row means "this is what happened for this
+person on this setup", not "this works on this provider".
 Tried it on your host? Please [file a compatibility report](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/issues/new?template=host-compatibility.yml)
-(no passwords, keys or customer files needed).
+(no passwords, keys or customer files needed). Reports where something failed are just as useful.
 
-| Provider | Plan / panel | Version | Connection | Verified scenarios | By |
-|---|---|---|---|---|---|
-| netcup | shared web hosting, Plesk (package name not recorded) | pre-0.1.0 development build, 2026-10-23 | FTPS; `REMOTE_TEMP_DIR` outside `httpdocs` | first upload, health check, changing an existing file + byte-exact restore, interrupted upload (live file intact), temp dir not reachable over HTTP, nested move from temp dir | maintainer |
+| Provider | Plan / panel | Version | Connection | First upload | Change existing file | Restore | Interrupted upload | Health-check rollback | Report |
+|---|---|---|---|---|---|---|---|---|---|
+| netcup | shared web hosting, Plesk (package name not recorded) | pre-0.1.0 development build, 2026-10-23 | FTPS; `REMOTE_TEMP_DIR` outside `httpdocs` | ✅ worked | ✅ worked | ✅ worked (byte-exact) | ✅ worked (live file intact) | ➖ not tried | [#2](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/issues/2) (maintainer) |
+
+✅ worked · ❌ failed (see linked report) · ➖ not tried
 
 ## Tests
 
@@ -139,7 +144,7 @@ python3 -m pip install pyftpdlib
 bash tests/run.sh
 ```
 
-The suite (34 checks) starts a real local FTP server and covers uploads, exclusions, incremental
+The suite (37 checks) starts a real local FTP server and covers uploads, exclusions, incremental
 deploys, dry runs, backups, byte-exact restore of a modified binary file, restore removing added
 files, automatic health-check rollback, an upload cut off mid-transfer (live file intact, no temp
 file left, retried on the next run), `REMOTE_TEMP_DIR` (nested paths, rename failure keeps the live
