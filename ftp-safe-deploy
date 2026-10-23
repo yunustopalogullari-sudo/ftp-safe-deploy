@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# ftp-safe-deploy — atomic, reversible FTP/FTPS deploys for shared hosting.
+# https://github.com/yunustopalogullari-sudo/ftp-safe-deploy  (MIT)
+#
+# Why: on shared hosting (netcup, IONOS, Strato, Hostinger, cPanel ...) a dropped FTP
+# connection leaves a half-written file live and the site breaks. This tool never
+# overwrites a live file directly: it backs up what is on the server, uploads to a hidden
+# temp name, checks the size, then renames into place. If a health check
+# fails afterwards, it rolls back on its own. Every deploy can be undone later.
+set -u -o pipefail
+
+VERSION="0.1.0"
+RUN_ID="$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 10)"
+[ -n "$RUN_ID" ] || RUN_ID="$$$(date +%s)"
+CONFIG_FILE="${FSD_CONFIG:-.ftpdeploy}"
+STATE_FILE=".ftpdeploy-state"
+BACKUP_ROOT=".deploy-backups"
+
+die()  { echo "error: $*" >&2; exit 1; }
+info() { echo "$*"; }
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ftp-safe-deploy [deploy] [--dry-run] [--all] [FILE...]   upload changed files (or the given ones)
+  ftp-safe-deploy restore [STAMP]                          undo a deploy (default: the latest)
+  ftp-safe-deploy list                                     list deploy backups
+  ftp-safe-deploy --version | --help
+
+Configuration is read from ./.ftpdeploy (KEY=value lines), see README.
+Password: $FTP_PASSWORD, else output of PASSWORD_CMD, else an interactive prompt.
+EOF
+}
+
+# ------------------------------------------------------------------ configuration
+load_config() {
+  [ -f "$CONFIG_FILE" ] || die "no $CONFIG_FILE in $(pwd) (see README for an example)"
+  FTP_HOST=""; FTP_PORT="21"; FTP_USER=""; REMOTE_DIR=""; LOCAL_DIR="."
+  PROTOCOL="ftps"; PLAIN_FALLBACK_EXT=""; HEALTH_URLS=""; EXCLUDE=""; PASSWORD_CMD=""
+  CURL_EXTRA=""
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="$(echo "$key" | tr -d '[:space:]')"
+    val="${val#\"}"; val="${val%\"}"
+    case "$key" in
+      FTP_HOST|FTP_PORT|FTP_USER|REMOTE_DIR|LOCAL_DIR|PROTOCOL|PLAIN_FALLBACK_EXT|HEALTH_URLS|EXCLUDE|PASSWORD_CMD|CURL_EXTRA)
+        printf -v "$key" '%s' "$val";;
+      *) die "unknown key in $CONFIG_FILE: $key";;
+    esac
+  done < "$CONFIG_FILE"
+  [ -n "$FTP_HOST" ] || die "FTP_HOST is not set"
+  [ -n "$FTP_USER" ] || die "FTP_USER is not set"
+  case "$PROTOCOL" in ftp|ftps) ;; *) die "PROTOCOL must be ftp or ftps";; esac
+  REMOTE_DIR="${REMOTE_DIR#/}"; REMOTE_DIR="${REMOTE_DIR%/}"
+  LOCAL_DIR="${LOCAL_DIR%/}"
+}
+
+# Credentials go into a 0600 curl config file so the password never shows up in `ps`.
+CURL_CFG=""
+cleanup() { [ -n "$CURL_CFG" ] && rm -f "$CURL_CFG"; }
+trap cleanup EXIT
+
+setup_auth() {
+  local pass="${FTP_PASSWORD:-}"
+  if [ -z "$pass" ] && [ -n "$PASSWORD_CMD" ]; then pass="$(sh -c "$PASSWORD_CMD")" || die "PASSWORD_CMD failed"; fi
+  if [ -z "$pass" ]; then read -r -s -p "FTP password for $FTP_USER@$FTP_HOST: " pass; echo; fi
+  [ -n "$pass" ] || die "empty password"
+  CURL_CFG="$(mktemp)"; chmod 600 "$CURL_CFG"
+  local esc_user esc_pass
+  esc_user="$(printf '%s' "$FTP_USER" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  esc_pass="$(printf '%s' "$pass" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  printf 'user = "%s:%s"\n' "$esc_user" "$esc_pass" > "$CURL_CFG"
+  pass=""
+}
+
+# curl wrapper. $1 = ftps|ftp, rest = curl args.
+c() {
+  local proto="$1"; shift
+  local args=(-sS --ftp-pasv --connect-timeout 20 --max-time 300 -K "$CURL_CFG")
+  [ "$proto" = ftps ] && args+=(--ssl-reqd)
+  # shellcheck disable=SC2206
+  [ -n "$CURL_EXTRA" ] && args+=($CURL_EXTRA)
+  curl "${args[@]}" "$@"
+}
+
+base_url() { printf 'ftp://%s:%s' "$FTP_HOST" "$FTP_PORT"; }
+rpath()    { if [ -n "$REMOTE_DIR" ]; then printf '/%s/%s' "$REMOTE_DIR" "$1"; else printf '/%s' "$1"; fi; }
+proto_for() {   # some hosts (e.g. netcup) stall on FTPS uploads of certain file types
+  local f="$1" ext
+  ext="${f##*.}"
+  if [ "$PROTOCOL" = ftps ] && [ -n "$PLAIN_FALLBACK_EXT" ]; then
+    for e in $PLAIN_FALLBACK_EXT; do [ "$ext" = "$e" ] && { echo ftp; return; }; done
+  fi
+  echo "$PROTOCOL"
+}
+
+remote_size() {   # $1 = relative path -> size or empty
+  c "$PROTOCOL" -I "$(base_url)$(rpath "$1")" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}'
+}
+
+# ------------------------------------------------------------------ local file set
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+
+excluded() {   # $1 = relative path
+  case "$1" in
+    .git/*|*/.git/*|"$BACKUP_ROOT"/*|"$CONFIG_FILE"|"$STATE_FILE"|.fsd-*|*/.fsd-*|.DS_Store|*/.DS_Store) return 0;;
+  esac
+  local pat
+  for pat in $EXCLUDE; do
+    # shellcheck disable=SC2254
+    case "$1" in $pat) return 0;; esac
+  done
+  return 1
+}
+
+list_local() {
+  (cd "$LOCAL_DIR" && find . -type f | sed 's#^\./##' | LC_ALL=C sort) | while IFS= read -r f; do
+    excluded "$f" || echo "$f"
+  done
+}
+
+changed_files() {   # files whose hash differs from the last successful deploy
+  local f h
+  list_local | while IFS= read -r f; do
+    h="$(sha "$LOCAL_DIR/$f")"
+    if [ "${ALL:-0}" = 1 ] || ! grep -qxF "$h  $f" "$STATE_FILE" 2>/dev/null; then echo "$f"; fi
+  done
+}
+
+record_state() {   # $1 = file with uploaded paths
+  local tmp f
+  tmp="$(mktemp)"
+  [ -f "$STATE_FILE" ] && grep -vFf <(sed 's/^/  /' "$1") "$STATE_FILE" > "$tmp" || true
+  while IFS= read -r f; do printf '%s  %s\n' "$(sha "$LOCAL_DIR/$f")" "$f" >> "$tmp"; done < "$1"
+  LC_ALL=C sort -k2 "$tmp" > "$STATE_FILE"; rm -f "$tmp"
+}
+
+# ------------------------------------------------------------------ remote operations
+backup_one() {   # $1 = relative path, $2 = backup dir -> prints "present" or "absent"
+  local dst="$2/files/$1" out code
+  mkdir -p "$(dirname "$dst")"
+  out="$(c "$PROTOCOL" "$(base_url)$(rpath "$1")" -o "$dst" 2>&1)"; code=$?
+  if [ $code -eq 0 ]; then echo present; return 0; fi
+  rm -f "$dst"
+  # 78 = remote file not found, 9 = access denied to a missing dir: both mean "did not exist"
+  case "$code" in 78|9) echo absent; return 0;; esac
+  echo "$out" >&2; return 1
+}
+
+tmp_name() {   # $1 = relative path -> hidden, unguessable temp name that keeps the extension,
+  # so a web server never serves half-uploaded PHP as plain-text source while it is in flight.
+  local d b
+  d="$(dirname "$1")"; b="$(basename "$1")"
+  if [ "$d" = . ]; then printf '.fsd-%s-%s' "$RUN_ID" "$b"; else printf '%s/.fsd-%s-%s' "$d" "$RUN_ID" "$b"; fi
+}
+
+safe_put() {   # $1 = local file, $2 = relative remote path
+  local src="$1" p="$2" want got proto tmp
+  want="$(wc -c < "$src" | tr -d ' ')"
+  proto="$(proto_for "$p")"
+  tmp="$(tmp_name "$p")"
+  if ! c "$proto" --retry 2 --ftp-create-dirs -T "$src" "$(base_url)$(rpath "$tmp")" -o /dev/null; then
+    remote_delete "$tmp" 2>/dev/null
+    echo "  ✗ $p: upload failed, live file untouched"; return 1
+  fi
+  got="$(remote_size "$tmp")"
+  if [ "$got" != "$want" ]; then
+    remote_delete "$tmp" 2>/dev/null
+    echo "  ✗ $p: size mismatch after upload ($got/$want bytes), live file untouched"; return 1
+  fi
+  c "$PROTOCOL" "$(base_url)/" -Q "RNFR $(rpath "$tmp")" -Q "RNTO $(rpath "$p")" -o /dev/null \
+    || { remote_delete "$tmp" 2>/dev/null; echo "  ✗ $p: rename into place failed, live file untouched"; return 1; }
+  [ "$(remote_size "$p")" = "$want" ] || { echo "  ✗ $p: size mismatch after rename"; return 1; }
+  echo "  ✓ $p ($want bytes)"
+}
+
+remote_delete() { c "$PROTOCOL" "$(base_url)/" -Q "DELE $(rpath "$1")" -o /dev/null; }
+
+health_ok() {
+  [ -n "$HEALTH_URLS" ] || return 0
+  local u code
+  for u in $HEALTH_URLS; do
+    code="$(curl -s -o /dev/null -L --max-time 20 -w '%{http_code}' "$u" || true)"
+    if [ "${code:-000}" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ]; then
+      info "  health $code $u"
+    else
+      info "  health FAILED ($code) $u"; return 1
+    fi
+  done
+}
+
+# ------------------------------------------------------------------ commands
+backup_names() {   # backup dir names, oldest first
+  local d
+  for d in "$BACKUP_ROOT"/*/; do [ -d "$d" ] && basename "$d"; done | LC_ALL=C sort
+}
+
+do_restore() {
+  local stamp="${1:-}" dir state p d
+  if [ -z "$stamp" ]; then
+    stamp="$(backup_names | while IFS= read -r d; do [ -f "$BACKUP_ROOT/$d/COMPLETE" ] && echo "$d"; done | tail -1)"
+  fi
+  dir="$BACKUP_ROOT/$stamp"
+  [ -f "$dir/manifest" ] || die "no backup '$stamp' (try: ftp-safe-deploy list)"
+  [ -f "$dir/COMPLETE" ] || die "backup '$stamp' is incomplete, refusing to restore from it"
+  info "Restoring $stamp -> $FTP_HOST:/$REMOTE_DIR"
+  while IFS=$'\t' read -r state p; do
+    if [ "$state" = present ]; then
+      safe_put "$dir/files/$p" "$p" || die "restore stopped at $p (nothing else changed)"
+    else
+      remote_delete "$p" && echo "  ✓ removed $p (did not exist before)" || echo "  ! could not remove $p"
+    fi
+  done < "$dir/manifest"
+  info "Restore complete."
+}
+
+do_deploy() {
+  local list stamp dir p state n=0 total
+  list="$(mktemp)"
+  if [ $# -gt 0 ]; then printf '%s\n' "$@" > "$list"; else changed_files > "$list"; fi
+  total="$(grep -c . "$list" || true)"
+  if [ "$total" = 0 ]; then info "Nothing changed since the last deploy."; rm -f "$list"; return 0; fi
+  while IFS= read -r p; do [ -f "$LOCAL_DIR/$p" ] || die "not a local file: $p"; done < "$list"
+
+  info "Deploy plan: $total file(s) -> $PROTOCOL://$FTP_HOST/$REMOTE_DIR"
+  sed 's/^/  - /' "$list"
+  if [ "${DRY_RUN:-0}" = 1 ]; then info "(dry run: nothing was uploaded)"; rm -f "$list"; return 0; fi
+
+  setup_auth
+  # Fixed-width sequence suffix: two deploys in the same second never share a backup,
+  # and plain string sorting always puts the newest backup last.
+  local base i=1
+  base="$(date +%Y%m%d-%H%M%S)"
+  stamp="$base-01"
+  while [ -e "$BACKUP_ROOT/$stamp" ]; do i=$((i + 1)); stamp="$base-$(printf '%02d' "$i")"; done
+  dir="$BACKUP_ROOT/$stamp"; mkdir -p "$dir"
+  info "1/3 backing up live files -> $dir"
+  : > "$dir/manifest"
+  while IFS= read -r p; do
+    state="$(backup_one "$p" "$dir")" || die "backup of $p failed: NOTHING was uploaded"
+    printf '%s\t%s\n' "$state" "$p" >> "$dir/manifest"
+  done < "$list"
+  touch "$dir/COMPLETE"
+
+  info "2/3 uploading (temp file + size check + rename)"
+  while IFS= read -r p; do
+    if ! safe_put "$LOCAL_DIR/$p" "$p"; then
+      info "Stopped after $n/$total file(s). Undo with: ftp-safe-deploy restore $stamp"
+      rm -f "$list"; exit 1
+    fi
+    n=$((n + 1))
+  done < "$list"
+
+  info "3/3 health check"
+  if ! health_ok; then
+    info "Health check failed: rolling back automatically."
+    do_restore "$stamp"
+    rm -f "$list"; exit 1
+  fi
+  record_state "$list"; rm -f "$list"
+  info "Done: $total file(s) deployed. Undo with: ftp-safe-deploy restore $stamp"
+}
+
+do_list() {
+  [ -d "$BACKUP_ROOT" ] || { info "No backups yet."; return; }
+  local d
+  backup_names | while IFS= read -r d; do
+    printf '%s  %s file(s)%s\n' "$d" "$(grep -c . "$BACKUP_ROOT/$d/manifest" 2>/dev/null || echo 0)" \
+      "$([ -f "$BACKUP_ROOT/$d/COMPLETE" ] || echo '  (incomplete)')"
+  done
+}
+
+# ------------------------------------------------------------------ main
+CMD="deploy"; DRY_RUN=0; ALL=0; FILES=()
+case "${1:-}" in
+  -h|--help) usage; exit 0;;
+  --version) echo "ftp-safe-deploy $VERSION"; exit 0;;
+  deploy) shift;;
+  restore) CMD=restore; shift;;
+  list) CMD=list; shift;;
+esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1;;
+    --all) ALL=1;;
+    -*) die "unknown option $1";;
+    *) FILES+=("$1");;
+  esac
+  shift
+done
+
+load_config
+case "$CMD" in
+  list) do_list;;
+  restore) setup_auth; do_restore "${FILES[0]:-}";;
+  deploy) do_deploy ${FILES[@]+"${FILES[@]}"};;
+esac

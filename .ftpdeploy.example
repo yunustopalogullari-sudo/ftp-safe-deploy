@@ -1,0 +1,14 @@
+# Copy to .ftpdeploy and adjust. Lines starting with # are ignored.
+FTP_HOST=ftp.example.com
+FTP_PORT=21
+FTP_USER=web123
+REMOTE_DIR=httpdocs
+LOCAL_DIR=.
+PROTOCOL=ftps
+# PLAIN_FALLBACK_EXT=php
+HEALTH_URLS=https://example.com/
+EXCLUDE=*.log .env node_modules/* tests/*
+# macOS Keychain:   security find-generic-password -a web123 -s my-ftp -w
+# pass:             pass show hosting/ftp
+# Doppler:          doppler secrets get FTP_PASSWORD --plain
+PASSWORD_CMD=

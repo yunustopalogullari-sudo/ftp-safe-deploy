@@ -1,0 +1,4 @@
+.ftpdeploy
+.ftpdeploy-state
+.deploy-backups/
+.DS_Store

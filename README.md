@@ -1,0 +1,123 @@
+# ftp-safe-deploy
+
+**Atomic, reversible FTP/FTPS deploys for shared hosting.** One Bash file, only needs `curl`.
+
+If you deploy to shared hosting (netcup, IONOS, Strato, Hostinger, cPanel/Plesk hosts ...) over FTP,
+you have probably seen this: the connection drops halfway through a file, the server keeps the
+half-written file, and the live site shows a blank page or a PHP parse error until you notice.
+
+`ftp-safe-deploy` never writes over a live file directly:
+
+1. **Backs up** every file it is about to replace (and remembers which ones did not exist yet).
+2. **Uploads** each file under a hidden, random temp name that keeps its extension
+   (e.g. `.fsd-k3x9q2m1a0-config.php`), so a web server never serves half-uploaded PHP as source.
+3. **Checks the size** on the server. Only a complete upload is **renamed** into place.
+4. Runs your **health check URLs**. If one fails, it **rolls back automatically**.
+5. Any deploy can be undone later with **one command**, including deleting files it added.
+
+```
+$ ftp-safe-deploy
+Deploy plan: 3 file(s) -> ftps://ftp.example.com/httpdocs
+  - index.php
+  - assets/style.css
+  - lib/core.php
+1/3 backing up live files -> .deploy-backups/20261023-141502-01
+2/3 uploading (temp file + size check + rename)
+  ✓ index.php (162992 bytes)
+  ✓ assets/style.css (160594 bytes)
+  ✓ lib/core.php (60913 bytes)
+3/3 health check
+  health 200 https://example.com/
+Done: 3 file(s) deployed. Undo with: ftp-safe-deploy restore 20261023-141502-01
+```
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yunustopalogullari-sudo/ftp-safe-deploy/main/ftp-safe-deploy \
+  -o /usr/local/bin/ftp-safe-deploy && chmod +x /usr/local/bin/ftp-safe-deploy
+```
+
+Works with the Bash that ships with macOS (3.2) and any Linux. Requirements: `bash`, `curl`,
+`sha256sum` or `shasum`.
+
+## Configure
+
+Create `.ftpdeploy` in your project root (see [`.ftpdeploy.example`](.ftpdeploy.example)):
+
+```ini
+FTP_HOST=ftp.example.com
+FTP_USER=web123
+REMOTE_DIR=httpdocs
+PROTOCOL=ftps
+HEALTH_URLS=https://example.com/ https://example.com/admin/login.php
+EXCLUDE=*.log .env node_modules/* tests/*
+PASSWORD_CMD=security find-generic-password -a web123 -s my-ftp -w
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `FTP_HOST` | required | FTP server name. For FTPS use the name on its certificate. |
+| `FTP_PORT` | `21` | |
+| `FTP_USER` | required | |
+| `REMOTE_DIR` | (login dir) | Folder on the server, relative to the FTP root. |
+| `LOCAL_DIR` | `.` | Folder to deploy. |
+| `PROTOCOL` | `ftps` | `ftps` (explicit TLS) or `ftp`. |
+| `PLAIN_FALLBACK_EXT` | | Extensions to send over plain FTP even when `PROTOCOL=ftps`, for hosts whose upload scanners stall FTPS transfers of e.g. `php`. |
+| `HEALTH_URLS` | | Space-separated URLs that must answer 2xx/3xx after a deploy, or it rolls back. |
+| `EXCLUDE` | | Space-separated glob patterns that are never uploaded. |
+| `PASSWORD_CMD` | | Command that prints the password (Keychain, `pass`, Doppler, 1Password CLI ...). |
+| `CURL_EXTRA` | | Extra curl flags, e.g. `--limit-rate 500k`. |
+
+**Password lookup order:** `$FTP_PASSWORD` → `PASSWORD_CMD` → interactive prompt. The password is
+passed to curl through a temporary `0600` config file, never on the command line, so it does not
+show up in `ps` or shell history.
+
+Add `.ftpdeploy-state` and `.deploy-backups/` to `.gitignore`.
+
+## Use
+
+```bash
+ftp-safe-deploy                  # upload files changed since the last successful deploy
+ftp-safe-deploy --dry-run        # show what would be uploaded, touch nothing
+ftp-safe-deploy --all            # upload everything, ignoring the change state
+ftp-safe-deploy index.php css/a.css   # upload just these files
+ftp-safe-deploy list             # list deploy backups
+ftp-safe-deploy restore          # undo the most recent deploy
+ftp-safe-deploy restore 20261023-141502-01
+```
+
+Only files whose SHA-256 changed since the last **successful** deploy are uploaded. A failed or
+rolled-back deploy does not update that state, so the next run tries the same files again.
+
+## Guarantees and limits
+
+- If the **backup** step fails, nothing is uploaded.
+- If an **upload** fails or the connection drops, the live file is untouched and the temp file is
+  deleted; already-renamed files stay live, and the tool prints the `restore` command for that deploy.
+- A deploy is **not a transaction** across files: during the few seconds between renames, some new
+  files are live while others are still old. For most PHP/static sites that is fine; for schema
+  changes, deploy the backwards-compatible part first.
+- It does not delete remote files that you deleted locally (on purpose).
+
+## Tests
+
+```bash
+python3 -m pip install pyftpdlib
+bash tests/run.sh
+```
+
+The suite (23 checks) starts a real local FTP server and covers uploads, exclusions, incremental
+deploys, dry runs, backups, byte-exact restore of a modified binary file, restore removing added
+files, automatic health-check rollback, an upload cut off mid-transfer (live file intact, no temp
+file left, retried on the next run), password secrecy and backup naming. CI runs it on Ubuntu and macOS.
+
+Also verified by hand against netcup shared hosting over FTPS: modify → restore is byte-exact
+(checked over FTPS and HTTP), and an upload cut after 4 seconds leaves the live file untouched.
+Other hosts should work if they speak standard FTP/FTPS with `SIZE`, `RNFR/RNTO` and `DELE`;
+reports welcome.
+
+## License
+
+MIT © Yunus Emre Topaloğulları. Born from deploying real customer sites to netcup shared hosting,
+where a half-uploaded `style.css` took a site down.
