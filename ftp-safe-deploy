@@ -10,7 +10,9 @@
 set -u -o pipefail
 
 VERSION="0.1.0"
-RUN_ID="$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 10)"
+# Read a fixed number of bytes: piping /dev/urandom into tr hangs forever where SIGPIPE is ignored
+# (e.g. GitHub's macOS runners), because tr then never notices that head has gone away.
+RUN_ID="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
 [ -n "$RUN_ID" ] || RUN_ID="$$$(date +%s)"
 CONFIG_FILE="${FSD_CONFIG:-.ftpdeploy}"
 STATE_FILE=".ftpdeploy-state"
