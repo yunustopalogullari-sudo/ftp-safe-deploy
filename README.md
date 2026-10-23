@@ -1,5 +1,7 @@
 # ftp-safe-deploy
 
+[![test](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/actions/workflows/test.yml/badge.svg)](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/actions/workflows/test.yml)
+
 **Atomic, reversible FTP/FTPS deploys for shared hosting.** One Bash file, only needs `curl`.
 
 If you deploy to shared hosting (netcup, IONOS, Strato, Hostinger, cPanel/Plesk hosts ...) over FTP,
