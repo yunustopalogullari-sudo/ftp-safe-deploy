@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Host compatibility report form and compatibility table in the README.
+
 ## 0.1.1 (2026-10-23)
 - Fix #1: `restore` now removes restored files from `.ftpdeploy-state`, so the next normal deploy
   uploads them again instead of reporting "Nothing changed". Regression tests added.

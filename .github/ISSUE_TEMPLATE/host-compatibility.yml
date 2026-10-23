@@ -1,0 +1,119 @@
+name: Host compatibility report
+description: Tell us how ftp-safe-deploy behaved on your hosting (works or not). One report covers one provider, one plan and one tool version.
+title: "[compat] <provider> – <plan>"
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! A report describes **your** setup only; it will be recorded as
+        "provider – plan – version – scenarios verified by a user", never as "works on this provider".
+
+        **Do not paste passwords, access keys, hostnames you want to keep private, or customer files.**
+        Remove secrets from any output before posting.
+  - type: input
+    id: version
+    attributes:
+      label: Tool version
+      description: Output of `ftp-safe-deploy --version`
+      placeholder: ftp-safe-deploy 0.1.1
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Your operating system and Bash version
+      placeholder: macOS 15, bash 3.2 / Ubuntu 24.04, bash 5.2
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Hosting provider
+      placeholder: IONOS / Strato / Hostinger / All-Inkl / cPanel host ...
+    validations:
+      required: true
+  - type: input
+    id: plan
+    attributes:
+      label: Plan / package type
+      description: The product name of your hosting package, and the control panel if you know it (Plesk, cPanel, own panel).
+      placeholder: Webhosting M (Plesk)
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Connection
+      options:
+        - FTPS (PROTOCOL=ftps)
+        - FTPS with PLAIN_FALLBACK_EXT for some extensions
+        - Plain FTP (PROTOCOL=ftp)
+    validations:
+      required: true
+  - type: dropdown
+    id: tempdir
+    attributes:
+      label: REMOTE_TEMP_DIR
+      options:
+        - Set, outside the web root
+        - Not set (temp files next to their target)
+    validations:
+      required: true
+  - type: dropdown
+    id: s_upload
+    attributes:
+      label: "Scenario: first upload of new files"
+      options: [Worked, Failed, Not tried]
+    validations:
+      required: true
+  - type: dropdown
+    id: s_modify
+    attributes:
+      label: "Scenario: changing an existing file"
+      options: [Worked, Failed, Not tried]
+    validations:
+      required: true
+  - type: dropdown
+    id: s_restore
+    attributes:
+      label: "Scenario: restore (undo a deploy)"
+      options: [Worked, Failed, Not tried]
+    validations:
+      required: true
+  - type: dropdown
+    id: s_interrupt
+    attributes:
+      label: "Scenario: interrupted upload (connection cut mid-transfer)"
+      description: "For example with CURL_EXTRA=--limit-rate 100k --max-time 3 on a large file, against a test folder."
+      options: [Worked (live file intact), Failed, Not tried]
+    validations:
+      required: true
+  - type: dropdown
+    id: s_health
+    attributes:
+      label: "Scenario: health-check rollback"
+      options: [Worked, Failed, Not tried]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "If something failed: what did you expect?"
+  - type: textarea
+    id: actual
+    attributes:
+      label: "If something failed: what happened instead?"
+  - type: textarea
+    id: output
+    attributes:
+      label: Output (secrets removed)
+      description: Paste the relevant tool output. Replace passwords, keys and private hostnames with ***.
+      render: shell
+  - type: checkboxes
+    id: nosecrets
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed passwords, keys and customer data from everything above.
+          required: true

@@ -121,6 +121,17 @@ so the next normal run uploads them again.
   part first.
 - It does not delete remote files that you deleted locally (on purpose).
 
+## Host compatibility
+
+Each row is one provider, one plan and one tool version, with only the scenarios that were actually
+tried. A row means "this worked for this person on this setup", not "this works on this provider".
+Tried it on your host? Please [file a compatibility report](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/issues/new?template=host-compatibility.yml)
+(no passwords, keys or customer files needed).
+
+| Provider | Plan / panel | Version | Connection | Verified scenarios | By |
+|---|---|---|---|---|---|
+| netcup | shared web hosting, Plesk (package name not recorded) | pre-0.1.0 development build, 2026-10-23 | FTPS; `REMOTE_TEMP_DIR` outside `httpdocs` | first upload, health check, changing an existing file + byte-exact restore, interrupted upload (live file intact), temp dir not reachable over HTTP, nested move from temp dir | maintainer |
+
 ## Tests
 
 ```bash
