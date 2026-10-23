@@ -9,8 +9,8 @@ half-written file, and the live site shows a blank page or a PHP parse error unt
 `ftp-safe-deploy` never writes over a live file directly:
 
 1. **Backs up** every file it is about to replace (and remembers which ones did not exist yet).
-2. **Uploads** each file under a hidden, random temp name that keeps its extension
-   (e.g. `.fsd-k3x9q2m1a0-config.php`), so a web server never serves half-uploaded PHP as source.
+2. **Uploads** each file under a random temp name, ideally into a folder **outside the web root**
+   (`REMOTE_TEMP_DIR`), so an in-flight file is never reachable over HTTP.
 3. **Checks the size** on the server. Only a complete upload is **renamed** into place.
 4. Runs your **health check URLs**. If one fails, it **rolls back automatically**.
 5. Any deploy can be undone later with **one command**, including deleting files it added.
@@ -49,6 +49,7 @@ Create `.ftpdeploy` in your project root (see [`.ftpdeploy.example`](.ftpdeploy.
 FTP_HOST=ftp.example.com
 FTP_USER=web123
 REMOTE_DIR=httpdocs
+REMOTE_TEMP_DIR=fsd-tmp
 PROTOCOL=ftps
 HEALTH_URLS=https://example.com/ https://example.com/admin/login.php
 EXCLUDE=*.log .env node_modules/* tests/*
@@ -61,6 +62,7 @@ PASSWORD_CMD=security find-generic-password -a web123 -s my-ftp -w
 | `FTP_PORT` | `21` | |
 | `FTP_USER` | required | |
 | `REMOTE_DIR` | (login dir) | Folder on the server, relative to the FTP root. |
+| `REMOTE_TEMP_DIR` | | **Recommended.** Folder for in-flight uploads, outside the web root (e.g. next to `httpdocs`). Must not be inside `REMOTE_DIR`; the tool checks it is writable before touching anything and stops with an error if not. |
 | `LOCAL_DIR` | `.` | Folder to deploy. |
 | `PROTOCOL` | `ftps` | `ftps` (explicit TLS) or `ftp`. |
 | `PLAIN_FALLBACK_EXT` | | Extensions to send over plain FTP even when `PROTOCOL=ftps`, for hosts whose upload scanners stall FTPS transfers of e.g. `php`. |
@@ -93,11 +95,27 @@ rolled-back deploy does not update that state, so the next run tries the same fi
 ## Guarantees and limits
 
 - If the **backup** step fails, nothing is uploaded.
-- If an **upload** fails or the connection drops, the live file is untouched and the temp file is
-  deleted; already-renamed files stay live, and the tool prints the `restore` command for that deploy.
+- If `REMOTE_TEMP_DIR` is set but unusable (missing and not creatable, not writable, or inside the
+  web root), the deploy **stops before uploading** — it never silently falls back to the web root.
+- If an **upload, size check or rename** fails, the live file is untouched. Already-renamed files
+  stay live, and the tool prints the `restore` command for that deploy.
+- **Temp files.** The tool tries to delete a temp file after any failure. If that also fails (for
+  example the connection is gone), it prints the full remote path so you can delete it by hand.
+  Leftovers are named `.fsd-<random>-...`; later runs ignore them and use new random names, so
+  they never overwrite anything — but they stay on the server until you remove them.
+- **Without `REMOTE_TEMP_DIR`** temp files sit next to their target for a few seconds and **may be
+  reachable over HTTP**. A leading dot and a random name are *not* access control: on netcup a
+  hidden temp file was served with HTTP 200 in our test. Keeping the extension (`.php`) means the
+  server treats the file like the real one, which avoids serving PHP as plain-text source on
+  typical setups, but whether PHP is executed depends entirely on the server configuration, and the
+  file could still be requested while in flight. Use `REMOTE_TEMP_DIR` for anything sensitive; the
+  tool prints a note on every deploy when it is not set.
+- **Backups never leave your machine.** They are stored in `.deploy-backups/` (created `chmod 700`)
+  and may contain old source code and old secrets. Keep that folder out of git (and out of the
+  folder you deploy) and delete old backups you no longer need.
 - A deploy is **not a transaction** across files: during the few seconds between renames, some new
-  files are live while others are still old. For most PHP/static sites that is fine; for schema
-  changes, deploy the backwards-compatible part first.
+  files are live while others are still old. For schema changes, deploy the backwards-compatible
+  part first.
 - It does not delete remote files that you deleted locally (on purpose).
 
 ## Tests
@@ -107,13 +125,17 @@ python3 -m pip install pyftpdlib
 bash tests/run.sh
 ```
 
-The suite (23 checks) starts a real local FTP server and covers uploads, exclusions, incremental
+The suite (34 checks) starts a real local FTP server and covers uploads, exclusions, incremental
 deploys, dry runs, backups, byte-exact restore of a modified binary file, restore removing added
 files, automatic health-check rollback, an upload cut off mid-transfer (live file intact, no temp
-file left, retried on the next run), password secrecy and backup naming. CI runs it on Ubuntu and macOS.
+file left, retried on the next run), `REMOTE_TEMP_DIR` (nested paths, rename failure keeps the live
+file, refusal of a temp dir inside the web root or an unusable one, no silent fallback),
+owner-only backups, password secrecy and backup naming. CI runs it on Ubuntu and macOS.
 
 Also verified by hand against netcup shared hosting over FTPS: modify → restore is byte-exact
-(checked over FTPS and HTTP), and an upload cut after 4 seconds leaves the live file untouched.
+(checked over FTPS and HTTP); an upload cut after 4 seconds leaves the live file untouched; a
+file in `REMOTE_TEMP_DIR` (next to `httpdocs`) was not reachable via four different URL tricks,
+and a nested file moved from there into the web root correctly.
 Other hosts should work if they speak standard FTP/FTPS with `SIZE`, `RNFR/RNTO` and `DELE`;
 reports welcome.
 

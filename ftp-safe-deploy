@@ -37,7 +37,7 @@ load_config() {
   [ -f "$CONFIG_FILE" ] || die "no $CONFIG_FILE in $(pwd) (see README for an example)"
   FTP_HOST=""; FTP_PORT="21"; FTP_USER=""; REMOTE_DIR=""; LOCAL_DIR="."
   PROTOCOL="ftps"; PLAIN_FALLBACK_EXT=""; HEALTH_URLS=""; EXCLUDE=""; PASSWORD_CMD=""
-  CURL_EXTRA=""
+  CURL_EXTRA=""; REMOTE_TEMP_DIR=""
   local line key val
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue;; esac
@@ -45,7 +45,7 @@ load_config() {
     key="$(echo "$key" | tr -d '[:space:]')"
     val="${val#\"}"; val="${val%\"}"
     case "$key" in
-      FTP_HOST|FTP_PORT|FTP_USER|REMOTE_DIR|LOCAL_DIR|PROTOCOL|PLAIN_FALLBACK_EXT|HEALTH_URLS|EXCLUDE|PASSWORD_CMD|CURL_EXTRA)
+      FTP_HOST|FTP_PORT|FTP_USER|REMOTE_DIR|LOCAL_DIR|PROTOCOL|PLAIN_FALLBACK_EXT|HEALTH_URLS|EXCLUDE|PASSWORD_CMD|CURL_EXTRA|REMOTE_TEMP_DIR)
         printf -v "$key" '%s' "$val";;
       *) die "unknown key in $CONFIG_FILE: $key";;
     esac
@@ -54,6 +54,7 @@ load_config() {
   [ -n "$FTP_USER" ] || die "FTP_USER is not set"
   case "$PROTOCOL" in ftp|ftps) ;; *) die "PROTOCOL must be ftp or ftps";; esac
   REMOTE_DIR="${REMOTE_DIR#/}"; REMOTE_DIR="${REMOTE_DIR%/}"
+  REMOTE_TEMP_DIR="${REMOTE_TEMP_DIR#/}"; REMOTE_TEMP_DIR="${REMOTE_TEMP_DIR%/}"
   LOCAL_DIR="${LOCAL_DIR%/}"
 }
 
@@ -149,29 +150,53 @@ backup_one() {   # $1 = relative path, $2 = backup dir -> prints "present" or "a
   echo "$out" >&2; return 1
 }
 
-tmp_name() {   # $1 = relative path -> hidden, unguessable temp name that keeps the extension,
-  # so a web server never serves half-uploaded PHP as plain-text source while it is in flight.
-  local d b
-  d="$(dirname "$1")"; b="$(basename "$1")"
-  if [ "$d" = . ]; then printf '.fsd-%s-%s' "$RUN_ID" "$b"; else printf '%s/.fsd-%s-%s' "$d" "$RUN_ID" "$b"; fi
+tmp_path() {   # $1 = relative path -> absolute remote temp path (random, keeps the extension).
+  # With REMOTE_TEMP_DIR (a folder outside the web root) the in-flight file is never web-reachable;
+  # without it, the temp file sits next to the target and may be reachable over HTTP while uploading.
+  local b
+  b="$(basename "$1")"
+  if [ -n "$REMOTE_TEMP_DIR" ]; then
+    printf '/%s/.fsd-%s-%s' "$REMOTE_TEMP_DIR" "$RUN_ID" "$(printf '%s' "$1" | tr '/' '_')"
+  else
+    local d; d="$(dirname "$1")"
+    if [ "$d" = . ]; then rpath ".fsd-$RUN_ID-$b"; else rpath "$d/.fsd-$RUN_ID-$b"; fi
+  fi
+}
+
+cleanup_tmp() {   # $1 = absolute remote temp path; report it if it cannot be removed
+  c "$PROTOCOL" "$(base_url)/" -Q "DELE $1" -o /dev/null 2>/dev/null \
+    || echo "  ! could not remove temp file $1 (connection lost?) - delete it by hand"
+}
+
+preflight_temp() {   # REMOTE_TEMP_DIR must exist (or be creatable), be writable and lie outside REMOTE_DIR
+  [ -n "$REMOTE_TEMP_DIR" ] || return 0
+  case "/$REMOTE_TEMP_DIR/" in
+    "/$REMOTE_DIR/"*) die "REMOTE_TEMP_DIR ($REMOTE_TEMP_DIR) is inside REMOTE_DIR ($REMOTE_DIR); it must be outside the web root";;
+  esac
+  local probe="/$REMOTE_TEMP_DIR/.fsd-$RUN_ID-probe" tmpf
+  tmpf="$(mktemp)"; printf 'ftp-safe-deploy probe\n' > "$tmpf"
+  if ! c "$PROTOCOL" --ftp-create-dirs -T "$tmpf" "$(base_url)$probe" -o /dev/null 2>/dev/null; then
+    rm -f "$tmpf"; die "REMOTE_TEMP_DIR /$REMOTE_TEMP_DIR is not usable (cannot create or write). Nothing was uploaded."
+  fi
+  rm -f "$tmpf"
+  c "$PROTOCOL" "$(base_url)/" -Q "DELE $probe" -o /dev/null 2>/dev/null || true
 }
 
 safe_put() {   # $1 = local file, $2 = relative remote path
   local src="$1" p="$2" want got proto tmp
   want="$(wc -c < "$src" | tr -d ' ')"
   proto="$(proto_for "$p")"
-  tmp="$(tmp_name "$p")"
-  if ! c "$proto" --retry 2 --ftp-create-dirs -T "$src" "$(base_url)$(rpath "$tmp")" -o /dev/null; then
-    remote_delete "$tmp" 2>/dev/null
-    echo "  ✗ $p: upload failed, live file untouched"; return 1
+  tmp="$(tmp_path "$p")"
+  if ! c "$proto" --retry 2 --ftp-create-dirs -T "$src" "$(base_url)$tmp" -o /dev/null; then
+    echo "  ✗ $p: upload failed, live file untouched"; cleanup_tmp "$tmp"; return 1
   fi
-  got="$(remote_size "$tmp")"
+  got="$(c "$PROTOCOL" -I "$(base_url)$tmp" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}')"
   if [ "$got" != "$want" ]; then
-    remote_delete "$tmp" 2>/dev/null
-    echo "  ✗ $p: size mismatch after upload ($got/$want bytes), live file untouched"; return 1
+    echo "  ✗ $p: size mismatch after upload ($got/$want bytes), live file untouched"; cleanup_tmp "$tmp"; return 1
   fi
-  c "$PROTOCOL" "$(base_url)/" -Q "RNFR $(rpath "$tmp")" -Q "RNTO $(rpath "$p")" -o /dev/null \
-    || { remote_delete "$tmp" 2>/dev/null; echo "  ✗ $p: rename into place failed, live file untouched"; return 1; }
+  if ! c "$PROTOCOL" --ftp-create-dirs "$(base_url)$(rpath "$(dirname "$p")")/" -Q "-RNFR $tmp" -Q "-RNTO $(rpath "$p")" -o /dev/null; then
+    echo "  ✗ $p: rename into place failed, live file untouched"; cleanup_tmp "$tmp"; return 1
+  fi
   [ "$(remote_size "$p")" = "$want" ] || { echo "  ✗ $p: size mismatch after rename"; return 1; }
   echo "  ✓ $p ($want bytes)"
 }
@@ -229,13 +254,16 @@ do_deploy() {
   if [ "${DRY_RUN:-0}" = 1 ]; then info "(dry run: nothing was uploaded)"; rm -f "$list"; return 0; fi
 
   setup_auth
+  preflight_temp
   # Fixed-width sequence suffix: two deploys in the same second never share a backup,
   # and plain string sorting always puts the newest backup last.
   local base i=1
   base="$(date +%Y%m%d-%H%M%S)"
   stamp="$base-01"
   while [ -e "$BACKUP_ROOT/$stamp" ]; do i=$((i + 1)); stamp="$base-$(printf '%02d' "$i")"; done
-  dir="$BACKUP_ROOT/$stamp"; mkdir -p "$dir"
+  dir="$BACKUP_ROOT/$stamp"
+  # backups hold old source and possibly old secrets: owner-only, and they never leave this machine
+  mkdir -p "$BACKUP_ROOT" && chmod 700 "$BACKUP_ROOT"; mkdir -p "$dir"
   info "1/3 backing up live files -> $dir"
   : > "$dir/manifest"
   while IFS= read -r p; do
@@ -245,6 +273,7 @@ do_deploy() {
   touch "$dir/COMPLETE"
 
   info "2/3 uploading (temp file + size check + rename)"
+  [ -n "$REMOTE_TEMP_DIR" ] || info "  note: REMOTE_TEMP_DIR is not set, so in-flight temp files sit inside the web root and may be reachable over HTTP for a few seconds (see README)."
   while IFS= read -r p; do
     if ! safe_put "$LOCAL_DIR/$p" "$p"; then
       info "Stopped after $n/$total file(s). Undo with: ftp-safe-deploy restore $stamp"
@@ -294,6 +323,6 @@ done
 load_config
 case "$CMD" in
   list) do_list;;
-  restore) setup_auth; do_restore "${FILES[0]:-}";;
+  restore) setup_auth; preflight_temp; do_restore "${FILES[0]:-}";;
   deploy) do_deploy ${FILES[@]+"${FILES[@]}"};;
 esac

@@ -3,4 +3,5 @@
 ## 0.1.0 (2026-10-23)
 - First release: backup before upload, hidden extension-preserving temp file + size check + rename (temp deleted on failure), health-check rollback,
   `restore` (re-uploads old files, deletes files the deploy added), incremental deploys by SHA-256,
-  `--dry-run`, `--all`, `list`, `PASSWORD_CMD`, `PLAIN_FALLBACK_EXT`.
+  `--dry-run`, `--all`, `list`, `PASSWORD_CMD`, `PLAIN_FALLBACK_EXT`, `REMOTE_TEMP_DIR` (temp uploads
+  outside the web root, checked before deploying), owner-only local backups, failed-cleanup reporting.

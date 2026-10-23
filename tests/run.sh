@@ -92,10 +92,42 @@ check "live file stays intact"        '[ "$(cat "$SERVER/www/big.bin")" = "A" ]'
 check "no temp file left on server"   '[ -z "$(find "$SERVER" -name ".fsd-*")" ]'
 check "failed deploy is retried"      '"$TOOL" > "$WORK/out15" 2>&1 && grep -q "big.bin" "$WORK/out15" && cmp -s "$SERVER/www/big.bin" big.bin'
 
+echo "REMOTE_TEMP_DIR outside the web root"
+echo "REMOTE_TEMP_DIR=tmp" >> .ftpdeploy
+mkdir -p sub/deep; echo "nested" > sub/deep/n.txt
+"$TOOL" sub/deep/n.txt > "$WORK/out16" 2>&1
+check "lands in place via temp dir"   '[ "$(cat "$SERVER/www/sub/deep/n.txt")" = nested ]'
+check "no temp files in web root"     '[ -z "$(find "$SERVER/www" -name ".fsd-*")" ]'
+check "temp dir left empty"           '[ -z "$(find "$SERVER/tmp" -type f)" ]'
+check "no web-root warning when set"  '! grep -q "REMOTE_TEMP_DIR is not set" "$WORK/out16"'
+
+echo "rename failure keeps live file"
+mkdir -p locked; echo "old" > locked/x.txt; "$TOOL" locked/x.txt > "$WORK/out17" 2>&1
+echo "new" > locked/x.txt; chmod 555 "$SERVER/www/locked"
+"$TOOL" locked/x.txt > "$WORK/out18" 2>&1
+chmod 755 "$SERVER/www/locked"
+check "rename failure is reported"    'grep -q "rename into place failed" "$WORK/out18"'
+check "live file unchanged"           '[ "$(cat "$SERVER/www/locked/x.txt")" = old ]'
+check "temp cleaned after failure"    '[ -z "$(find "$SERVER" -name ".fsd-*")" ]'
+
+echo "unsafe or unusable temp dir is refused"
+sed -i.bak 's#^REMOTE_TEMP_DIR=.*#REMOTE_TEMP_DIR=www/tmp#' .ftpdeploy && rm -f .ftpdeploy.bak
+echo "v9" > locked/x.txt
+"$TOOL" locked/x.txt > "$WORK/out19" 2>&1
+check "temp dir inside web root fails" 'grep -q "inside REMOTE_DIR" "$WORK/out19" && [ "$(cat "$SERVER/www/locked/x.txt")" = old ]'
+printf 'file' > "$SERVER/blocked"
+sed -i.bak 's#^REMOTE_TEMP_DIR=.*#REMOTE_TEMP_DIR=blocked/tmp#' .ftpdeploy && rm -f .ftpdeploy.bak
+"$TOOL" locked/x.txt > "$WORK/out20" 2>&1
+check "unusable temp dir fails"       'grep -q "not usable" "$WORK/out20" && [ "$(cat "$SERVER/www/locked/x.txt")" = old ]'
+check "no silent fallback to web root" '[ -z "$(find "$SERVER/www" -name ".fsd-*")" ]'
+sed -i.bak '/REMOTE_TEMP_DIR/d' .ftpdeploy && rm -f .ftpdeploy.bak
+echo "old" > locked/x.txt
+check "backups are owner-only (700)"  '[ "$(ls -ld .deploy-backups | cut -c1-10)" = drwx------ ]'
+
 echo "safety"
 check "password not in process args"  '! grep -q secret "$WORK/out1"'
 "$TOOL" list > "$WORK/out9" 2>&1
-check "one backup per deploy"         '[ "$(grep -c "file(s)" "$WORK/out9")" -ge 8 ]'
+check "one backup per deploy"         '[ "$(grep -c "file(s)" "$WORK/out9")" -ge 10 ]'
 
 echo
 echo "passed: $pass  failed: $fail"

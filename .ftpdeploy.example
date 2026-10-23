@@ -3,6 +3,8 @@ FTP_HOST=ftp.example.com
 FTP_PORT=21
 FTP_USER=web123
 REMOTE_DIR=httpdocs
+# Recommended: a folder OUTSIDE the web root for in-flight uploads
+REMOTE_TEMP_DIR=fsd-tmp
 LOCAL_DIR=.
 PROTOCOL=ftps
 # PLAIN_FALLBACK_EXT=php
