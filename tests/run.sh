@@ -124,10 +124,22 @@ sed -i.bak '/REMOTE_TEMP_DIR/d' .ftpdeploy && rm -f .ftpdeploy.bak
 echo "old" > locked/x.txt
 check "backups are owner-only (700)"  '[ "$(ls -ld .deploy-backups | cut -c1-10)" = drwx------ ]'
 
+echo "deploy after restore re-uploads (issue #1)"
+echo "first" > again.txt; "$TOOL" again.txt > "$WORK/out21" 2>&1
+echo "second" > again.txt; "$TOOL" > "$WORK/out22" 2>&1
+"$TOOL" restore > "$WORK/out23" 2>&1
+check "restore put 'first' back"      '[ "$(cat "$SERVER/www/again.txt")" = first ]'
+"$TOOL" > "$WORK/out24" 2>&1
+check "next deploy re-uploads it"     '[ "$(cat "$SERVER/www/again.txt")" = second ]'
+echo "only" > fresh.txt; "$TOOL" fresh.txt > "$WORK/out25" 2>&1
+"$TOOL" restore > "$WORK/out26" 2>&1
+"$TOOL" > "$WORK/out27" 2>&1
+check "removed-by-restore file returns" '[ "$(cat "$SERVER/www/fresh.txt" 2>/dev/null)" = only ]'
+
 echo "safety"
 check "password not in process args"  '! grep -q secret "$WORK/out1"'
 "$TOOL" list > "$WORK/out9" 2>&1
-check "one backup per deploy"         '[ "$(grep -c "file(s)" "$WORK/out9")" -ge 10 ]'
+check "one backup per deploy"         '[ "$(grep -c "file(s)" "$WORK/out9")" -ge 14 ]'
 
 echo
 echo "passed: $pass  failed: $fail"

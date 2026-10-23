@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ftp-safe-deploy — atomic, reversible FTP/FTPS deploys for shared hosting.
+# ftp-safe-deploy — reversible FTP/FTPS deploys for shared hosting, atomic per file.
 # https://github.com/yunustopalogullari-sudo/ftp-safe-deploy  (MIT)
 #
 # Why: on shared hosting (netcup, IONOS, Strato, Hostinger, cPanel ...) a dropped FTP
@@ -9,7 +9,7 @@
 # fails afterwards, it rolls back on its own. Every deploy can be undone later.
 set -u -o pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 # Read a fixed number of bytes: piping /dev/urandom into tr hangs forever where SIGPIPE is ignored
 # (e.g. GitHub's macOS runners), because tr then never notices that head has gone away.
 RUN_ID="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -140,6 +140,14 @@ record_state() {   # $1 = file with uploaded paths
   LC_ALL=C sort -k2 "$tmp" > "$STATE_FILE"; rm -f "$tmp"
 }
 
+forget_state() {   # $1 = file with relative paths: their live copy no longer matches the local hash
+  [ -f "$STATE_FILE" ] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  awk 'NR==FNR { drop["  " $0] = 1; next } { key = substr($0, index($0, "  ")) } !(key in drop)' "$1" "$STATE_FILE" > "$tmp"
+  mv "$tmp" "$STATE_FILE"
+}
+
 # ------------------------------------------------------------------ remote operations
 backup_one() {   # $1 = relative path, $2 = backup dir -> prints "present" or "absent"
   local dst="$2/files/$1" out code
@@ -233,13 +241,18 @@ do_restore() {
   [ -f "$dir/manifest" ] || die "no backup '$stamp' (try: ftp-safe-deploy list)"
   [ -f "$dir/COMPLETE" ] || die "backup '$stamp' is incomplete, refusing to restore from it"
   info "Restoring $stamp -> $FTP_HOST:/$REMOTE_DIR"
+  # Restored files no longer match what is on this machine: drop them from the deploy state so
+  # the next normal deploy uploads them again (issue #1). Done per file, even if restore stops.
+  local touched; touched="$(mktemp)"
   while IFS=$'\t' read -r state p; do
     if [ "$state" = present ]; then
-      safe_put "$dir/files/$p" "$p" || die "restore stopped at $p (nothing else changed)"
+      safe_put "$dir/files/$p" "$p" || { forget_state "$touched"; rm -f "$touched"; die "restore stopped at $p (nothing else changed)"; }
     else
-      remote_delete "$p" && echo "  ✓ removed $p (did not exist before)" || echo "  ! could not remove $p"
+      if remote_delete "$p"; then echo "  ✓ removed $p (did not exist before)"; else echo "  ! could not remove $p"; fi
     fi
+    echo "$p" >> "$touched"
   done < "$dir/manifest"
+  forget_state "$touched"; rm -f "$touched"
   info "Restore complete."
 }
 

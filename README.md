@@ -2,7 +2,7 @@
 
 [![test](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/actions/workflows/test.yml/badge.svg)](https://github.com/yunustopalogullari-sudo/ftp-safe-deploy/actions/workflows/test.yml)
 
-**Atomic, reversible FTP/FTPS deploys for shared hosting.** One Bash file, only needs `curl`.
+**Reversible FTP/FTPS deploys for shared hosting, atomic per file.** One Bash file, only needs `curl`.
 
 If you deploy to shared hosting (netcup, IONOS, Strato, Hostinger, cPanel/Plesk hosts ...) over FTP,
 you have probably seen this: the connection drops halfway through a file, the server keeps the
@@ -92,7 +92,8 @@ ftp-safe-deploy restore 20261023-141502-01
 ```
 
 Only files whose SHA-256 changed since the last **successful** deploy are uploaded. A failed or
-rolled-back deploy does not update that state, so the next run tries the same files again.
+rolled-back deploy does not update that state, and `restore` removes the restored files from it,
+so the next normal run uploads them again.
 
 ## Guarantees and limits
 
@@ -143,5 +144,5 @@ reports welcome.
 
 ## License
 
-MIT © Yunus Emre Topaloğulları. Born from deploying real customer sites to netcup shared hosting,
-where a half-uploaded `style.css` took a site down.
+MIT © Yunus Emre Topaloğulları. Born from deploying sites to netcup shared hosting, where a dropped
+connection left a half-uploaded `style.css` (99,604 of 160,594 bytes) live on a staging site I maintain.

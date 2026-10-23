@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 (2026-10-23)
+- Fix #1: `restore` now removes restored files from `.ftpdeploy-state`, so the next normal deploy
+  uploads them again instead of reporting "Nothing changed". Regression tests added.
+- Docs: describe the tool as atomic *per file*, not across the whole deploy.
+
 ## 0.1.0 (2026-10-23)
 - First release: backup before upload, hidden extension-preserving temp file + size check + rename (temp deleted on failure), health-check rollback,
   `restore` (re-uploads old files, deletes files the deploy added), incremental deploys by SHA-256,
