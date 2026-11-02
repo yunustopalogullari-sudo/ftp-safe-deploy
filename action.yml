@@ -1,0 +1,116 @@
+name: FTP Safe Deploy
+description: FTP/FTPS deploys for shared hosting, atomic per file, with backups, size checks and rollback on a failed health check
+author: yunustopalogullari-sudo
+branding:
+  icon: upload-cloud
+  color: green
+inputs:
+  server:
+    description: FTP server name. For FTPS use the name on its certificate.
+    required: true
+  username:
+    description: FTP user
+    required: true
+  password:
+    description: FTP password. Pass it from a repository secret.
+    required: true
+  port:
+    description: FTP port
+    default: "21"
+  protocol:
+    description: ftps (explicit TLS) or ftp
+    default: ftps
+  local-dir:
+    description: Folder to deploy, relative to the workspace
+    default: .
+  remote-dir:
+    description: Folder on the server, relative to the FTP root
+    default: ""
+  remote-temp-dir:
+    description: Recommended. Folder for in-flight uploads, outside the web root
+    default: ""
+  health-urls:
+    description: URLs that must answer 2xx/3xx after the deploy, separated by spaces or newlines. A failure rolls the deploy back.
+    default: ""
+  exclude:
+    description: Glob patterns that are never uploaded, separated by spaces or newlines
+    default: .github/*
+  plain-fallback-ext:
+    description: Extensions to send over plain FTP even when protocol is ftps
+    default: ""
+  all:
+    description: Upload every file, ignoring what the previous run recorded
+    default: "false"
+  dry-run:
+    description: Show what would be uploaded, touch nothing
+    default: "false"
+outputs:
+  backup-dir:
+    description: Folder on the runner with this run's backups. It holds files from the live server, so do not publish it from a public repository.
+    value: ${{ steps.prepare.outputs.work }}/.deploy-backups
+runs:
+  using: composite
+  steps:
+    - id: prepare
+      shell: bash
+      env:
+        SERVER: ${{ inputs.server }}
+        REMOTE_DIR: ${{ inputs.remote-dir }}
+      run: |
+        work="$RUNNER_TEMP/ftp-safe-deploy"
+        mkdir -p "$work"
+        slug="$(printf '%s-%s' "$SERVER" "$REMOTE_DIR" | tr -c 'A-Za-z0-9._-' '-')"
+        echo "work=$work" >> "$GITHUB_OUTPUT"
+        echo "prefix=ftp-safe-deploy-state-$slug-" >> "$GITHUB_OUTPUT"
+    # Only the hash list is cached. Backups stay on the runner because they contain live server files.
+    - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ steps.prepare.outputs.work }}/.ftpdeploy-state
+        key: ${{ steps.prepare.outputs.prefix }}${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: ${{ steps.prepare.outputs.prefix }}
+    - shell: bash
+      working-directory: ${{ steps.prepare.outputs.work }}
+      env:
+        FTP_PASSWORD: ${{ inputs.password }}
+        IN_SERVER: ${{ inputs.server }}
+        IN_USERNAME: ${{ inputs.username }}
+        IN_PORT: ${{ inputs.port }}
+        IN_PROTOCOL: ${{ inputs.protocol }}
+        IN_LOCAL_DIR: ${{ inputs.local-dir }}
+        IN_REMOTE_DIR: ${{ inputs.remote-dir }}
+        IN_REMOTE_TEMP_DIR: ${{ inputs.remote-temp-dir }}
+        IN_HEALTH_URLS: ${{ inputs.health-urls }}
+        IN_EXCLUDE: ${{ inputs.exclude }}
+        IN_PLAIN_FALLBACK_EXT: ${{ inputs.plain-fallback-ext }}
+        IN_ALL: ${{ inputs.all }}
+        IN_DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        [ -n "$FTP_PASSWORD" ] || { echo "::error::password is empty. Secrets are not passed to workflows from forks."; exit 1; }
+        case "$IN_LOCAL_DIR" in
+          /*) local_dir="$IN_LOCAL_DIR" ;;
+          *) local_dir="$GITHUB_WORKSPACE/$IN_LOCAL_DIR" ;;
+        esac
+        # A newline in a value would start a new key in the config file.
+        for v in "$IN_SERVER" "$IN_USERNAME" "$IN_PORT" "$IN_PROTOCOL" "$local_dir" "$IN_REMOTE_DIR" "$IN_REMOTE_TEMP_DIR" "$IN_PLAIN_FALLBACK_EXT"; do
+          case "$v" in *$'\n'*) echo "::error::inputs other than health-urls and exclude must be a single line"; exit 1 ;; esac
+        done
+        {
+          printf 'FTP_HOST=%s\n' "$IN_SERVER"
+          printf 'FTP_PORT=%s\n' "$IN_PORT"
+          printf 'FTP_USER=%s\n' "$IN_USERNAME"
+          printf 'PROTOCOL=%s\n' "$IN_PROTOCOL"
+          printf 'LOCAL_DIR=%s\n' "$local_dir"
+          printf 'REMOTE_DIR=%s\n' "$IN_REMOTE_DIR"
+          printf 'REMOTE_TEMP_DIR=%s\n' "$IN_REMOTE_TEMP_DIR"
+          printf 'PLAIN_FALLBACK_EXT=%s\n' "$IN_PLAIN_FALLBACK_EXT"
+          printf 'HEALTH_URLS=%s\n' "$(printf '%s' "$IN_HEALTH_URLS" | tr '\n' ' ')"
+          printf 'EXCLUDE=%s\n' "$(printf '%s' "$IN_EXCLUDE" | tr '\n' ' ')"
+        } > .ftpdeploy
+        args=()
+        [ "$IN_ALL" = true ] && args+=(--all)
+        [ "$IN_DRY_RUN" = true ] && args+=(--dry-run)
+        bash "$GITHUB_ACTION_PATH/ftp-safe-deploy" ${args[@]+"${args[@]}"}
+    - uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ steps.prepare.outputs.work }}/.ftpdeploy-state
+        key: ${{ steps.prepare.outputs.prefix }}${{ github.run_id }}-${{ github.run_attempt }}

@@ -95,6 +95,47 @@ Only files whose SHA-256 changed since the last **successful** deploy are upload
 rolled-back deploy does not update that state, and `restore` removes the restored files from it,
 so the next normal run uploads them again.
 
+## GitHub Actions
+
+```yaml
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency: production-ftp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: yunustopalogullari-sudo/ftp-safe-deploy@v0.2.0
+        with:
+          server: ftp.example.com
+          username: web123
+          password: ${{ secrets.FTP_PASSWORD }}
+          remote-dir: httpdocs
+          remote-temp-dir: fsd-tmp
+          health-urls: https://example.com/
+```
+
+Inputs: `server`, `username`, `password`, `port`, `protocol`, `local-dir`, `remote-dir`,
+`remote-temp-dir`, `health-urls`, `exclude` (default `.github/*`), `plain-fallback-ext`, `all`,
+`dry-run`. They mean the same as the config keys above. Tested on `ubuntu-latest` against a local
+FTP server in this repo's CI; other runners and real hosts count as "not tried" until reported.
+
+How it differs from running the tool on your own machine:
+
+- **Backups disappear with the runner.** A failed health check still rolls back in the same run, but
+  there is no later `restore`. To undo a deploy, redeploy an older commit. Files that only the bad
+  commit added stay on the server.
+- **Backups are never uploaded by the action**, because they contain files from your live server,
+  and artifacts of a public repository can be downloaded by others. The `backup-dir` output gives
+  the path if you want to store them somewhere private.
+- **Only the list of file hashes is cached** between runs (`actions/cache`). If the cache is gone,
+  everything is uploaded again. If someone changes files on the server by hand, the action does not
+  notice; use `all: true`.
+- Secrets are not available to workflows from forks, so run it on `push`, not on `pull_request`.
+
 ## Guarantees and limits
 
 - If the **backup** step fails, nothing is uploaded.

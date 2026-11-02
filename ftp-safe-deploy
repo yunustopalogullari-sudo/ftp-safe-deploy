@@ -9,7 +9,7 @@
 # fails afterwards, it rolls back on its own. Every deploy can be undone later.
 set -u -o pipefail
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 # Read a fixed number of bytes: piping /dev/urandom into tr hangs forever where SIGPIPE is ignored
 # (e.g. GitHub's macOS runners), because tr then never notices that head has gone away.
 RUN_ID="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"

@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (unreleased)
+- GitHub Action (`action.yml`): state cached between runs, backups stay on the runner, tested in CI.
 - Host compatibility report form and a per-scenario table (worked / failed with report link / not tried); netcup test recorded as #2.
 
 ## 0.1.1 (2026-10-23)

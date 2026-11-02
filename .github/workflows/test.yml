@@ -18,3 +18,66 @@ jobs:
         run: shellcheck -S warning ftp-safe-deploy tests/run.sh
       - name: end-to-end tests
         run: bash tests/run.sh
+  action:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FTP_ROOT: /tmp/ftproot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyftpdlib
+      - name: start a local FTP server and create a site
+        run: |
+          mkdir -p "$FTP_ROOT/www" site/.github
+          nohup python -m pyftpdlib -p 2121 -u tester -P secret -d "$FTP_ROOT" -w > "$RUNNER_TEMP/ftpd.log" 2>&1 &
+          for _ in $(seq 1 50); do (echo > /dev/tcp/127.0.0.1/2121) 2>/dev/null && break; sleep 0.1; done
+          echo one > site/index.html
+          echo ci > site/.github/ci.yml
+      - name: first deploy
+        uses: ./
+        with: &deploy
+          server: 127.0.0.1
+          port: "2121"
+          protocol: ftp
+          username: tester
+          password: secret
+          local-dir: site
+          remote-dir: www
+          remote-temp-dir: tmp
+      - name: uploads, excludes .github and leaves no temp files
+        run: |
+          [ "$(cat "$FTP_ROOT/www/index.html")" = one ]
+          [ ! -e "$FTP_ROOT/www/.github" ]
+          [ -z "$(find "$FTP_ROOT" -name '.fsd-*')" ]
+          echo changed-on-server > "$FTP_ROOT/www/index.html"
+      - name: second deploy without local changes
+        uses: ./
+        with: *deploy
+      - name: nothing was uploaded
+        run: |
+          [ "$(cat "$FTP_ROOT/www/index.html")" = changed-on-server ]
+          echo one > "$FTP_ROOT/www/index.html"
+          echo two > site/index.html
+      - name: deploy with a failing health check
+        id: unhealthy
+        continue-on-error: true
+        uses: ./
+        with:
+          server: 127.0.0.1
+          port: "2121"
+          protocol: ftp
+          username: tester
+          password: secret
+          local-dir: site
+          remote-dir: www
+          remote-temp-dir: tmp
+          health-urls: http://127.0.0.1:9/never-up
+      - name: failed and rolled back
+        env:
+          OUTCOME: ${{ steps.unhealthy.outcome }}
+        run: |
+          [ "$OUTCOME" = failure ]
+          [ "$(cat "$FTP_ROOT/www/index.html")" = one ]
